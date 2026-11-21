@@ -14,13 +14,13 @@
 
 > 例外：只有当用户明确要求"直接改"、"修复"、"帮我改一下"等指令时，才可跳过方案确认环节直接修改，但仍应在修改后说明改动内容。
 
-> **记录要求**：所有非 Spec 流程的代码改动，必须同步记录到 [code_changes.md](.trae/code_changes.md)，包含改动原因和改动方案。Spec 流程的改动记录在对应 spec 的 tasks.md 中，无需重复记录。
+> **记录要求**：所有非 Spec 流程的代码改动，必须同步记录到 [code_changes.md](code_changes.md)，包含改动原因和改动方案。Spec 流程的改动记录在对应 spec 的 tasks.md 中，无需重复记录。
 
-> **Git 推送约束**：代码修改后仅执行本地提交（`git commit`），**默认不推送到远程仓库**。只有当用户明确要求"推送"、"上传到 GitHub"、"push"等指令时，才执行 `git push`。
+> **Git 操作约束**：代码修改完成后，**不执行任何 git 操作**（包括 `git add`、`git commit`、`git push`），由用户自行决定何时提交与推送。只有当用户明确要求"提交"、"推送"、"上传到 GitHub"等指令时，才执行对应的 git 操作。
 
 ## 二、SPEC 管理规约
 
-复杂、跨组件、高影响的需求变更，走 Spec 流程。Spec 详细操作规则见 [specs/spec.md](.trae/specs/spec.md)，仅在创建或管理 Spec 时参考。
+复杂、跨组件、高影响的需求变更，走 Spec 流程。Spec 详细操作规则见 [specs/spec.md](specs/spec.md)，仅在创建或管理 Spec 时参考。
 
 核心要点：
 - 状态流转：`new` → `underway` → `completed` 或 `cancelled`，通过移动文件夹变更状态
