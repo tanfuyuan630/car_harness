@@ -1,0 +1,38 @@
+# Agent Harness 框架
+deepagents>=0.3.0
+langgraph>=1.0.0
+langchain>=1.0.0
+langchain-core>=1.0.0
+langchain-openai>=0.3.0
+
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sse-starlette>=2.1.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP 客户端
+requests>=2.31.0
+
+# 数据处理
+pandas>=2.0.0
+pyyaml>=6.0
+
+# RAG 知识库（LlamaIndex + Chroma）
+llama-index-core>=0.14.0
+llama-index-readers-file>=0.5.0
+docx2txt>=0.9
+llama-index-embeddings-openai-like>=0.5.0
+llama-index-vector-stores-chroma>=0.7.0
+llama-index-postprocessor-dashscope-rerank>=0.7.0
+llama-index-retrievers-bm25>=0.7.0
+llama-index-llms-openai>=0.6.0
+chromadb>=1.0.0
+pywin32>=306; sys_platform == "win32"
+
+# IM 渠道
+lark-oapi>=1.7.0
+langgraph-checkpoint-redis>=0.5.2
+redis>=5.2.1
+tenacity>=8.2

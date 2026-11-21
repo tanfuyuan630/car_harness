@@ -1,0 +1,31 @@
+"""领域知识库工具：为每个业务领域构造固定检索范围的检索工具。"""
+from __future__ import annotations
+
+import json
+
+from langchain_core.tools import StructuredTool
+
+from app.rag.domains import DOMAIN_BY_KEY
+from app.rag.service import rag_service
+
+
+def build_domain_knowledge_tool(domain: str) -> StructuredTool:
+    """构造只检索指定领域的知识库工具。
+
+    领域由闭包固定，不作为工具参数暴露给模型，避免子 Agent 越域检索。
+    """
+    spec = DOMAIN_BY_KEY[domain]
+
+    def _search(query: str, top_k: int = 4) -> str:
+        """检索本领域知识库文档，返回片段、来源文件名与相关性分数。"""
+        results = rag_service.retrieve(query, top_k=top_k, domain=domain)
+        return json.dumps(results, ensure_ascii=False, indent=2)
+
+    return StructuredTool.from_function(
+        func=_search,
+        name="search_knowledge_base",
+        description=(
+            f"检索「{spec.title}」领域的知识库文档。"
+            "传入检索问题或关键词，返回相关片段、来源文件名与相关性分数。"
+        ),
+    )

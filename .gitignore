@@ -1,0 +1,79 @@
+# ---------------- 环境变量与密钥 ----------------
+# 后端 .env 含真实 API Key，禁止提交；仅保留 .env.example 作为模板
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# 前端环境变量
+frontend/.env
+frontend/.env.*
+
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ---------------- Node / 前端 ----------------
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.npm
+.eslintcache
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------- 运行时生成数据 ----------------
+# Chroma 向量数据库缓存，运行时自动重建
+data/chroma_db/
+# RAG 文档转换缓存
+backend/.cache/
+data/.cache/
+
+# 后端工作区（Agent 生成的临时文件）
+backend/workspace/
+
+# ---------------- 原始抓取素材（体积大，运行时不读取） ----------------
+# 如需保留抓取历史可注释掉此行
+data/raw/
+
+# ---------------- IDE / 编辑器 ----------------
+.trae/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------------- 操作系统 ----------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------- 散落的误操作文件 ----------------
+backend/0.5.0
+backend/8.2
+
+# ---------------- 其他 ----------------
+*.sqlite3
+*.db
+fetch.log
+data/fetch.log
