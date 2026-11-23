@@ -22,6 +22,8 @@ def build_agent():
         subagents=subagents,
         backend=registry.filesystem_backend,
         checkpointer=registry.checkpointer,
+        # 技能源：从 workspace/skills 目录加载 SKILL.md，按渐进式披露注入提示词
+        skills=registry.skills_sources,
         # 人机协同：最终推荐审批与用户补充信息都触发中断
         interrupt_on={
             FINAL_RECOMMENDATION_TOOL.name: True,

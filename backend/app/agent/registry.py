@@ -185,6 +185,13 @@ class AgentRegistry:
         from deepagents.backends.filesystem import FilesystemBackend
         return FilesystemBackend(root_dir=str(settings.workspace_dir_path))
 
+    # ---------------- 技能源 ----------------
+
+    @property
+    def skills_sources(self) -> list[str]:
+        """返回技能源目录列表，路径相对于 FilesystemBackend 的 root_dir（workspace）。"""
+        return ["/skills"]
+
 
 # 全局单例
 registry = AgentRegistry()
