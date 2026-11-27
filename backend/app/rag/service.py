@@ -22,6 +22,12 @@ from llama_index.core.vector_stores import MetadataFilter, MetadataFilters
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
+from app.agent.degrade import (
+    DegradeComponent,
+    degrade_enabled,
+    force_degraded,
+    log_degrade,
+)
 from app.core.config import settings
 from app.rag.doc_loader import load_documents
 from app.rag.embeddings import get_embedding
@@ -55,6 +61,8 @@ class RAGService:
         # 按领域缓存的 BM25 检索器，键为领域标识，空串表示全库
         self._bm25: dict[str, BM25Retriever] = {}
         self._document_count: int = 0
+        # 降级冷却截止时间（time.monotonic），窗口内检索直接返回空结果
+        self._degraded_until: float = 0.0
 
     # ---------------- Chroma 集合 ----------------
 
@@ -188,6 +196,33 @@ class RAGService:
         return retriever
 
     def retrieve(self, query: str, top_k: int | None = None, domain: str | None = None) -> list[dict]:
+        """检索知识库；底层依赖异常且降级开启时返回空结果并进入冷却窗口。"""
+        if force_degraded():
+            log_degrade(DegradeComponent.RAG, "forced", domain=domain or "-", once=True)
+            return []
+
+        now = time.monotonic()
+        if now < self._degraded_until:
+            return []
+
+        try:
+            return self._retrieve(query, top_k, domain)
+        except Exception as exc:
+            if not degrade_enabled():
+                raise
+            cooldown = max(0, settings.RAG_DEGRADE_COOLDOWN_SECONDS)
+            self._degraded_until = now + cooldown
+            log_degrade(
+                DegradeComponent.RAG,
+                "retrieve_failed",
+                domain=domain or "-",
+                cooldown=cooldown,
+                error=str(exc)[:150],
+                once=True,
+            )
+            return []
+
+    def _retrieve(self, query: str, top_k: int | None, domain: str | None) -> list[dict]:
         """检索知识库：按领域过滤后向量召回（可选混合、查询改写）再重排并截断。"""
         index = self.ensure_index()
 

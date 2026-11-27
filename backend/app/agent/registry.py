@@ -8,9 +8,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from app.agent.degrade import (
+    DegradeComponent,
+    degrade_enabled,
+    force_degraded,
+    log_degrade,
+)
 from app.agent.llm import create_tiered_llm
 from app.agent.tools.car_tools import get_car_tools
 from app.agent.tools.filesystem_tools import get_filesystem_tools
@@ -68,13 +76,50 @@ _DOMAIN_SUBAGENTS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+def _degraded_subagent_runnable(name: str) -> RunnableLambda:
+    """构造子 Agent 降级 runnable：记录失败日志并返回提示，让主 Agent 继续回答。"""
+
+    def _fallback(state: dict[str, Any]) -> dict[str, Any]:
+        log_degrade(
+            DegradeComponent.SUBAGENT,
+            "subagent_failed",
+            subagent=name,
+            error=str(state.get("degrade_error"))[:150],
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"【{name}】暂不可用，请基于通用知识回答，并说明信息可能不完整。"
+                )
+            ]
+        }
+
+    return RunnableLambda(_fallback)
+
+
+def _compile_degradable_subagent(spec: dict[str, Any]) -> dict[str, Any]:
+    """将子 Agent 预编译为带失败降级的 CompiledSubAgent 规格。"""
+    from deepagents.middleware.subagents import create_sub_agent
+
+    runnable = create_sub_agent(spec)
+    wrapped = runnable.with_fallbacks(
+        [_degraded_subagent_runnable(spec["name"])],
+        exception_key="degrade_error",
+    )
+    return {
+        "name": spec["name"],
+        "description": spec["description"],
+        "runnable": wrapped,
+    }
+
+
 class AgentRegistry:
     """组件注册中心。"""
 
     def __init__(self) -> None:
         self._llm = None
         self._tools: list[BaseTool] = []
-        self._subagents: list[dict[str, Any]] = []
+        self._subagents: list[dict[str, Any]] | None = None
 
     # ---------------- LLM ----------------
 
@@ -119,8 +164,8 @@ class AgentRegistry:
 
     # ---------------- 子智能体 ----------------
 
-    def _build_subagents(self) -> list[dict[str, Any]]:
-        """按声明式领域表构建子 Agent 列表，RAG 关闭时跳过领域子 Agent。"""
+    def _raw_subagents(self) -> list[dict[str, Any]]:
+        """按声明式领域表构建子 Agent 原始规格，RAG 关闭时跳过领域子 Agent。"""
         # 子 Agent 共用同一分档模型实例，分类结果按委派任务描述缓存
         subagent_model = create_tiered_llm("subagent")
         subagents: list[dict[str, Any]] = [
@@ -161,9 +206,22 @@ class AgentRegistry:
             return [s for s in subagents if s["name"] in enabled]
         return subagents
 
+    def _build_subagents(self) -> list[dict[str, Any]]:
+        """构建子 Agent 列表：强制降级时全部跳过，降级开启时包装失败兜底。"""
+        if force_degraded():
+            log_degrade(
+                DegradeComponent.SUBAGENT, "forced", note="已跳过领域子 Agent 注册"
+            )
+            return []
+
+        subagents = self._raw_subagents()
+        if degrade_enabled():
+            return [_compile_degradable_subagent(spec) for spec in subagents]
+        return subagents
+
     @property
     def subagents(self) -> list[dict[str, Any]]:
-        if not self._subagents:
+        if self._subagents is None:
             self._subagents = self._build_subagents()
         return self._subagents
 

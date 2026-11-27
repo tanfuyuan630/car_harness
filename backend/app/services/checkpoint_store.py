@@ -1,7 +1,7 @@
 """LangGraph Redis Checkpointer 的构建、初始化与释放。
 
 使用官方 langgraph-checkpoint-redis，要求 Redis 8 或安装 RedisJSON/RediSearch。
-Redis 不可用或缺少模块时直接抛错，不回退到内存或文件。
+降级开启时 Redis 不可用改用内存检查点启动；降级关闭时保持启动失败。
 """
 from __future__ import annotations
 
@@ -13,6 +13,13 @@ from langgraph.checkpoint.memory import MemorySaver
 from redis.backoff import ExponentialBackoff
 from redis.retry import Retry
 
+from app.agent.degrade import (
+    DegradeComponent,
+    degrade_enabled,
+    force_degraded,
+    log_degrade,
+    mark_component_degraded,
+)
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -42,8 +49,19 @@ def _ttl_config() -> dict[str, Any]:
     }
 
 
+def _memory_degraded(reason: str, address: str, error: str = "-") -> BaseCheckpointSaver:
+    """切换到内存检查点并标记进程级降级，返回内存 Saver。"""
+    mark_component_degraded(DegradeComponent.CHECKPOINT)
+    log_degrade(DegradeComponent.CHECKPOINT, reason, address=address, error=error)
+    logger.warning(
+        "[Checkpointer] 已降级为内存检查点：检查点仅存于当前进程，重启即丢失；"
+        "中断恢复与 TTL 维护不可用；不支持多 worker 部署"
+    )
+    return MemorySaver()
+
+
 async def setup_checkpointer() -> BaseCheckpointSaver:
-    """初始化 Checkpointer；失败时抛出包含 Redis 地址的 RuntimeError。"""
+    """初始化 Checkpointer；降级开启时 Redis 失败改用内存检查点。"""
     global _saver, _context_manager, _redis_client
 
     if _saver is not None:
@@ -54,9 +72,13 @@ async def setup_checkpointer() -> BaseCheckpointSaver:
         logger.info("[Checkpointer] 使用内存模式（仅用于测试）")
         return _saver
 
+    address = f"{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}"
+    if force_degraded():
+        _saver = _memory_degraded("forced", address)
+        return _saver
+
     from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
-    address = f"{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}"
     _context_manager = AsyncRedisSaver.from_conn_string(
         settings.redis_url,
         connection_args=build_connection_args(),
@@ -73,6 +95,9 @@ async def setup_checkpointer() -> BaseCheckpointSaver:
             except Exception:
                 pass
             _context_manager = None
+        if degrade_enabled():
+            _saver = _memory_degraded("redis_unavailable", address, str(exc)[:200])
+            return _saver
         raise RuntimeError(
             f"Redis Checkpointer 初始化失败（{address}）：{exc}。"
             "请确认 Redis 8.0 已启动，并已启用 RedisJSON 与 RediSearch（JSON.SET/FT.CREATE 可用）。"

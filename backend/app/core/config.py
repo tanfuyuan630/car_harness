@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     MAX_RECOVERABLE_RETRIES: int = 2
     OPENAI_TIMEOUT_SECONDS: int = 120
 
+    # 依赖降级：模型、RAG、检查点、子 Agent 在异常时降级而非整轮失败。
+    # 关闭总开关后完全回到“失败即报错”的原有行为；强制降级用于演练与应急。
+    DEGRADE_ENABLED: bool = True
+    DEGRADE_FORCE: bool = False
+    # RAG 故障后的冷却窗口（秒），窗口内检索直接返回空结果
+    RAG_DEGRADE_COOLDOWN_SECONDS: int = 60
+
     # 可插拔：子智能体开关（逗号分隔）
     ENABLED_SUBAGENTS: str = ""
 

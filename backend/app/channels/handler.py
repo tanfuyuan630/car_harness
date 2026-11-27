@@ -8,6 +8,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
+from app.agent.degrade import reset_request_degrade
 from app.agent.harness import get_agent
 from app.agent.error_policy import reset_recovery_budget
 from app.agent.tiering import (
@@ -124,6 +125,7 @@ async def _resume_pending(
 async def _run(user_id: str, thread_id: str, message: IncomingMessage, on_delta: DeltaCallback) -> str:
     """流式调用 Agent；存在中断时先处理审批或补充信息。"""
     agent = get_agent()
+    reset_request_degrade()
     config = {
         "configurable": {"thread_id": thread_id},
         "run_name": f"{message.channel}-chat",

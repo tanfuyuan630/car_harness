@@ -14,6 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sse_starlette.sse import EventSourceResponse
 
+from app.agent.degrade import (
+    DegradeComponent,
+    is_component_degraded,
+    reset_request_degrade,
+)
 from app.agent.error_policy import (
     ErrorKind,
     classify_exception,
@@ -63,7 +68,10 @@ async def on_startup() -> None:
     await setup_checkpointer()
     init_db()
     _start_im_channels()
-    checkpoint_maintenance.start_maintenance()
+    if is_component_degraded(DegradeComponent.CHECKPOINT):
+        logger.warning("[Checkpointer] 降级模式已启用，检查点维护任务不启动")
+    else:
+        checkpoint_maintenance.start_maintenance()
 
 
 @app.on_event("shutdown")
@@ -184,6 +192,7 @@ async def get_interrupts(thread_id: str, _: User = Depends(get_current_user)):
 async def resume_thread(thread_id: str, req: ResumeRequest, current_user: User = Depends(get_current_user)):
     """提交审批或补充信息，恢复 Agent 执行。"""
     agent = get_agent()
+    reset_request_degrade()
     # 恢复时复用线程最近档位，避免补充信息过短导致档位漂移
     tier: str | None = None
     if settings.LLM_TIER_ENABLED:
@@ -294,8 +303,9 @@ def _build_messages(user_id: str, thread_id: str, new_message: str) -> list[dict
 async def chat(req: ChatRequest, current_user: User = Depends(get_current_user)):
     """非流式聊天接口。"""
     agent = get_agent()
+    reset_request_degrade()
     messages = _build_messages(current_user.user_id, req.thread_id, req.message)
-    # 分档开启时先分类再调 Agent；分类失败按可重试错误返回，不静默换档
+    # 分档开启时先分类再调 Agent；降级开启时分类失败按中档继续
     try:
         level, tier = await _prepare_main_tier(current_user.user_id, req.thread_id, req.message)
     except Exception as exc:
@@ -331,8 +341,9 @@ async def chat(req: ChatRequest, current_user: User = Depends(get_current_user))
 async def chat_stream(req: ChatRequest, current_user: User = Depends(get_current_user)):
     """流式聊天接口（SSE）。"""
     agent = get_agent()
+    reset_request_degrade()
     messages = _build_messages(current_user.user_id, req.thread_id, req.message)
-    # 分档开启时先分类再流式调用；分类失败直接返回可重试错误
+    # 分档开启时先分类再流式调用；降级开启时分类失败按中档继续
     try:
         level, tier = await _prepare_main_tier(current_user.user_id, req.thread_id, req.message)
     except Exception as exc:
@@ -430,6 +441,7 @@ async def chat_stream(req: ChatRequest, current_user: User = Depends(get_current
 async def retry_thread(thread_id: str, current_user: User = Depends(get_current_user)):
     """从最后一个成功检查点继续未完成的任务，不重复用户消息。"""
     agent = get_agent()
+    reset_request_degrade()
     # 重试复用线程最近档位，不重新分类
     tier: str | None = None
     if settings.LLM_TIER_ENABLED:

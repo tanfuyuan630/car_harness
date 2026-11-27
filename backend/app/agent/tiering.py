@@ -18,6 +18,13 @@ from typing import Any
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from app.agent.degrade import (
+    DegradeComponent,
+    degrade_enabled,
+    force_degraded,
+    get_degraded_level,
+    log_degrade,
+)
 from app.agent.error_policy import ErrorKind, RecoverableToolError, classify_exception
 from app.core.config import settings
 
@@ -123,8 +130,18 @@ def log_decision(
 
 
 async def prepare_main_tier(text: str, previous_text: str, thread_id: str) -> ComplexityLevel:
-    """入口分类：判定当前问题复杂度并写入主 Agent 档位上下文。"""
-    decision = await classify_complexity(text, previous_text)
+    """入口分类：判定当前问题复杂度并写入主 Agent 档位上下文。
+
+    强制降级时直接使用最低档，不调用分类器。
+    """
+    if force_degraded():
+        set_main_tier(ComplexityLevel.SIMPLE, thread_id)
+        log_degrade(
+            DegradeComponent.LLM, "forced", thread=thread_id, tier="low", source="main"
+        )
+        return ComplexityLevel.SIMPLE
+
+    decision = await classify_complexity(text, previous_text, thread_id)
     set_main_tier(decision.level, thread_id)
     log_decision("main", decision, thread_id)
     return decision.level
@@ -163,8 +180,13 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
-async def classify_complexity(text: str, previous_text: str = "") -> ComplexityDecision:
-    """调用轻量分类模型判定复杂度；解析失败按可恢复错误上抛，不做默认档兜底。"""
+async def classify_complexity(
+    text: str, previous_text: str = "", thread_id: str = ""
+) -> ComplexityDecision:
+    """调用轻量分类模型判定复杂度。
+
+    降级开启时分类失败按 medium 继续执行并记日志；关闭时保持原策略上抛。
+    """
     from app.agent.llm import get_llm
 
     llm = get_llm(settings.LLM_CLASSIFIER_MODEL, settings.LLM_CLASSIFIER_MAX_TOKENS)
@@ -183,6 +205,18 @@ async def classify_complexity(text: str, previous_text: str = "") -> ComplexityD
         result = await structured.ainvoke(messages)
         return result if isinstance(result, ComplexityDecision) else ComplexityDecision.model_validate(result)
     except Exception as exc:
+        # 降级：分类器不可用时按中档执行，保证请求可继续
+        if degrade_enabled():
+            log_degrade(
+                DegradeComponent.LLM,
+                "classifier_failed",
+                thread=thread_id or "-",
+                error=str(exc)[:150],
+                once=True,
+            )
+            return ComplexityDecision(
+                level=ComplexityLevel.MODERATE, reason="classifier_degraded"
+            )
         # 临时错误保持原类型，交由上层按现有错误分级处理
         if classify_exception(exc) == ErrorKind.TRANSIENT:
             raise
@@ -237,14 +271,23 @@ def _task_key(text: str) -> str:
 async def resolve_subagent_level(
     messages: list[BaseMessage], thread_id: str, subagent_name: str = "-"
 ) -> ComplexityLevel:
-    """子 Agent 按委派任务描述选档；同一任务后续轮次复用缓存结果。"""
+    """子 Agent 按委派任务描述选档；同一任务后续轮次复用缓存结果。
+
+    强制降级或本请求已降档时直接复用对应档位，不再分类。
+    """
+    if force_degraded():
+        return ComplexityLevel.SIMPLE
+    degraded = get_degraded_level()
+    if degraded is not None:
+        return degraded
+
     text = _first_human_text(messages) or _last_human_text(messages)
     key = _task_key(text)
     cached = _cache_get(key)
     if cached is not None:
         return cached
 
-    decision = await classify_complexity(text)
+    decision = await classify_complexity(text, thread_id=thread_id)
     log_decision("subagent", decision, thread_id, subagent_name)
     _cache_put(key, decision.level)
     return decision.level
@@ -252,11 +295,20 @@ async def resolve_subagent_level(
 
 async def resolve_main_level(messages: list[BaseMessage], thread_id: str) -> ComplexityLevel:
     """主 Agent 档位：入口已设置时直接复用，否则按当前消息惰性分类一次。"""
+    if force_degraded():
+        set_main_tier(ComplexityLevel.SIMPLE, thread_id)
+        return ComplexityLevel.SIMPLE
+
     level = get_main_tier()
     if level is not None:
         return level
 
-    decision = await classify_complexity(_last_human_text(messages))
+    degraded = get_degraded_level()
+    if degraded is not None:
+        set_main_tier(degraded, thread_id)
+        return degraded
+
+    decision = await classify_complexity(_last_human_text(messages), thread_id=thread_id)
     set_main_tier(decision.level, thread_id)
     log_decision("main", decision, thread_id)
     return decision.level

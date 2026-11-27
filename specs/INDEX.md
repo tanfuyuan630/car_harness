@@ -14,3 +14,4 @@
 | SPC-008 | acp-file-generation | completed | 2026-11-21 | [completed/SPC-008-acp-file-generation](completed/SPC-008-acp-file-generation) |
 | SPC-009 | redis-checkpoint-resume | completed | 2026-11-21 | [completed/SPC-009-redis-checkpoint-resume](completed/SPC-009-redis-checkpoint-resume) |
 | SPC-010 | multi-tier-llm-routing | completed | 2026-11-21 | [completed/SPC-010-multi-tier-llm-routing](completed/SPC-010-multi-tier-llm-routing) |
+| SPC-011 | backend-api-degradation | completed | 2026-11-25 | [completed/SPC-011-backend-api-degradation](completed/SPC-011-backend-api-degradation) |

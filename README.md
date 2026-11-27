@@ -12,16 +12,16 @@
 
 主 Agent 作为主管，只负责识别意图、拆解任务、委派领域子智能体并汇总结果。已注册的领域子智能体：
 
-| 子智能体 | 负责范围 |
-| --- | --- |
-| `car_model_expert` | 车型参数、车型对比、购车推荐 |
-| `insurance_underwriting_expert` | 车险投保、报价、核保、出单、条款责任 |
-| `insurance_claims_expert` | 报案、查勘、定损、人伤、理算核赔、拒赔 |
-| `vehicle_sales_expert` | 接待、试驾、报价签约、分期、交付上牌、置换 |
-| `after_sales_expert` | 预约、维修保养、备件、三包保修、召回、投诉 |
-| `repair_beauty_expert` | 洗车、漆面、内饰、贴膜与施工安全 |
-| `car_accessories_expert` | 用品分类、采购查验、交易退换、库存 |
-| `company_info_expert` | 公司介绍、联系方式、到店路线与导航 |
+| 子智能体                          | 负责范围                                   |
+| --------------------------------- | ------------------------------------------ |
+| `car_model_expert`              | 车型参数、车型对比、购车推荐               |
+| `insurance_underwriting_expert` | 车险投保、报价、核保、出单、条款责任       |
+| `insurance_claims_expert`       | 报案、查勘、定损、人伤、理算核赔、拒赔     |
+| `vehicle_sales_expert`          | 接待、试驾、报价签约、分期、交付上牌、置换 |
+| `after_sales_expert`            | 预约、维修保养、备件、三包保修、召回、投诉 |
+| `repair_beauty_expert`          | 洗车、漆面、内饰、贴膜与施工安全           |
+| `car_accessories_expert`        | 用品分类、采购查验、交易退换、库存         |
+| `company_info_expert`           | 公司介绍、联系方式、到店路线与导航         |
 
 单一领域问题委派一个子智能体；跨领域问题拆成多个子任务后按业务顺序汇总。
 
@@ -77,6 +77,13 @@
 - 默认关闭（`LLM_TIER_ENABLED=false`）：所有请求统一使用 `OPENAI_MODEL`，不产生分类调用，`/api/chat` 返回 `tier="off"`。
 - 开启后入口先用轻量分类模型输出 `simple / moderate / complex`，主 Agent 据此选档；子 Agent 再按被委派的任务描述独立分类。
 - 中断恢复与断点续跑复用线程最近档位，避免补充信息过短导致档位漂移。
+
+### 11. 依赖降级
+
+- 覆盖模型、RAG、检查点、子 Agent 四类依赖，单点故障不再导致整轮请求失败。
+- 自动降级在依赖真实异常时触发；`DEGRADE_FORCE=true` 可手动强制四项全部降级，用于演练与应急。
+- 降级对用户不可见，只写服务端 `[Degrade]` 日志，接口响应结构、前端与飞书回复文案均不变。
+- `DEGRADE_ENABLED=false` 时完全回到“失败即报错”的原有行为。
 
 ## 系统架构
 
@@ -137,7 +144,7 @@ deepagents Agent Harness
 2. 主 Agent 选档：档位写入请求级 `ContextVar`，由 `tier_role="main"` 的模型实例在每次调用前解析，映射到 low/medium/high 对应模型。
 3. 子 Agent 再分类：`tier_role="subagent"` 按首条委派任务描述分类，结果以任务描述哈希做进程内 LRU 缓存（上限 256），同一任务只分类一次。
 4. 档位持久化：线程元数据 `lg:thread_meta:{thread_id}` 记录 `tier`，`/resume` 与 `/retry` 直接复用；缺失时按 `medium` 执行并记录告警。
-5. 分类失败按现有错误策略返回可重试错误，不静默切换到默认档；`LLM_TIER_ENABLED=false` 时上述流程全部跳过。
+5. 分类失败时，降级开启则按 `medium` 继续并记录 `[Degrade]` 日志；降级关闭则按原有错误策略返回可重试错误。`LLM_TIER_ENABLED=false` 时上述流程全部跳过。
 6. 可观测：分类完成后记录线程、来源（main/subagent）、复杂度、档位、模型名与理由，不记录消息原文。
 
 ### RAG 实现
@@ -179,18 +186,34 @@ deepagents Agent Harness
 
 ### 错误恢复策略
 
-| 错误类型 | 典型场景 | 处理方式 |
-| --- | --- | --- |
-| 临时错误 | 网络抖动、限流、超时 | tenacity 在模型调用与工具调用内自动有限重试；流式已输出 token 后不再整段重试 |
+| 错误类型       | 典型场景                    | 处理方式                                                                                |
+| -------------- | --------------------------- | --------------------------------------------------------------------------------------- |
+| 临时错误       | 网络抖动、限流、超时        | tenacity 在模型调用与工具调用内自动有限重试；流式已输出 token 后不再整段重试            |
 | LLM 可恢复错误 | 工具调用失败、JSON 解析失败 | 异常转为 `[工具错误] ...` 写入 State，回到 Agent 重新生成；连续超过上限升级为致命错误 |
-| 用户可修复错误 | 缺少关键参数、指令模糊 | 触发 `input_required` 中断，等待用户补充后恢复 |
-| 未知/致命错误 | 代码逻辑 Bug、底层依赖崩溃 | 冒泡给开发者，日志记录 `thread_id` 与 `checkpoint_id`，检查点保留供人工断点重跑 |
+| 用户可修复错误 | 缺少关键参数、指令模糊      | 触发 `input_required` 中断，等待用户补充后恢复                                        |
+| 未知/致命错误  | 代码逻辑 Bug、底层依赖崩溃  | 冒泡给开发者，日志记录 `thread_id` 与 `checkpoint_id`，检查点保留供人工断点重跑     |
+
+### 依赖降级
+
+`backend/app/agent/degrade.py` 统一承载降级状态与日志，日志格式固定为 `[Degrade] component=... reason=...`。
+
+| 组件     | 触发条件                                 | 降级行为                                                                                                             |
+| -------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 模型     | 选定档位调用失败且尚未输出 token         | 逐级降档（high → medium → low），每档试一次；本请求后续调用复用新档位；已输出 token 的流式响应不降档，避免重复内容 |
+| RAG      | Chroma、embedding、rerank 或索引构建异常 | 返回空检索结果，子 Agent 按通用知识回答；进入 `RAG_DEGRADE_COOLDOWN_SECONDS` 冷却窗口，窗口内不再调用底层依赖      |
+| 检查点   | 启动阶段 Redis 不可用或缺少模块          | 改用内存检查点启动，Web 与飞书渠道保持可用；不启动检查点维护任务                                                     |
+| 子 Agent | 子 Agent 模型失败、工具异常或递归超限    | `task` 返回降级提示，主 Agent 继续完成本轮回答                                                                     |
+
+- 请求级 LLM 降档状态用 `ContextVar` 承载，每轮请求入口统一重置。
+- `DEGRADE_FORCE=true` 时四项全部强制降级：主/子 Agent 固定低档、跳过检索、强制内存检查点、不注册领域子 Agent。
+- 强制降级跳过分类器，不产生额外模型调用。
 
 ### Redis 检查点维护
 
 - 检查点默认 TTL 为 3 天，读取时自动续期。
 - 维护任务按间隔扫描：有未完成中断的线程续期；已完成且超过保留期的线程删除检查点并移出索引。
-- Redis 客户端启用指数退避重试；持续不可用时启动失败或返回 503，不回退到内存，避免“看似成功但状态丢失”。
+- Redis 客户端启用指数退避重试；持续不可用时按降级策略处理：降级开启则改用内存检查点启动，关闭则启动失败或返回 503。
+- 内存检查点仅存于当前进程，重启即丢失，中断恢复与 TTL 维护不可用，且不支持多 worker 部署。
 
 ### ACP 文件生成
 
@@ -227,7 +250,7 @@ deepagents Agent Harness
 - `views/CarBrowser.vue`：品牌 → 车系 → 车型 → 详情。
 - `views/CompareView.vue`：搜索并选择 2~5 款车型对比关键参数。
 - `stores/chat.js`：线程、消息、加载与流式更新状态。
-- `router/index.js`：登录守卫。
+- `router/index.js`：登录首页。
 
 ## 目录结构
 
@@ -241,6 +264,7 @@ car_harness/
 │   │   │   ├── registry.py         # LLM、工具、子 Agent、Checkpointer 注册中心
 │   │   │   ├── llm.py              # OpenAI 兼容模型创建（含临时错误重试）
 │   │   │   ├── error_policy.py     # 四类错误分级、重试预算与 tenacity 重试
+│   │   │   ├── degrade.py          # 四类依赖降级状态与统一日志
 │   │   │   ├── prompts/            # 主/子 Agent 提示词
 │   │   │   └── tools/              # 文件、车型、RAG、高德、推荐、ACP、补充信息
 │   │   ├── api/auth.py             # 注册登录接口
@@ -353,28 +377,28 @@ cd ..
 
 ## 主要接口
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/auth/register` | 注册 |
-| POST | `/api/auth/login` | 登录，返回 JWT |
-| POST | `/api/auth/logout` | 登出 |
-| GET | `/api/auth/me` | 当前用户 |
-| POST | `/api/threads` | 新建会话 |
-| GET | `/api/threads/{thread_id}/history` | 会话历史 |
-| GET | `/api/threads/{thread_id}/interrupts` | 查询待审批中断 |
-| POST | `/api/threads/{thread_id}/resume` | 提交审批或补充信息并恢复执行 |
-| POST | `/api/threads/{thread_id}/retry` | 从最后成功检查点断点续跑 |
-| POST | `/api/chat` | 非流式对话 |
-| POST | `/api/chat/stream` | SSE 流式对话 |
-| GET | `/api/conversations` | 会话列表 |
-| GET | `/api/conversations/{thread_id}` | 会话详情 |
-| GET | `/api/workspace/files` | 工作区文件列表 |
-| GET | `/api/workspace/files/{path}` | 下载工作区文件 |
-| GET | `/api/brands` | 品牌列表 |
-| GET | `/api/brands/{brand}/series` | 车系列表 |
-| GET | `/api/cars` | 车型搜索 |
-| GET | `/api/cars/{model_id}` | 车型详情 |
-| GET | `/api/health` | 健康检查 |
+| 方法 | 路径                                    | 说明                         |
+| ---- | --------------------------------------- | ---------------------------- |
+| POST | `/api/auth/register`                  | 注册                         |
+| POST | `/api/auth/login`                     | 登录，返回 JWT               |
+| POST | `/api/auth/logout`                    | 登出                         |
+| GET  | `/api/auth/me`                        | 当前用户                     |
+| POST | `/api/threads`                        | 新建会话                     |
+| GET  | `/api/threads/{thread_id}/history`    | 会话历史                     |
+| GET  | `/api/threads/{thread_id}/interrupts` | 查询待审批中断               |
+| POST | `/api/threads/{thread_id}/resume`     | 提交审批或补充信息并恢复执行 |
+| POST | `/api/threads/{thread_id}/retry`      | 从最后成功检查点断点续跑     |
+| POST | `/api/chat`                           | 非流式对话                   |
+| POST | `/api/chat/stream`                    | SSE 流式对话                 |
+| GET  | `/api/conversations`                  | 会话列表                     |
+| GET  | `/api/conversations/{thread_id}`      | 会话详情                     |
+| GET  | `/api/workspace/files`                | 工作区文件列表               |
+| GET  | `/api/workspace/files/{path}`         | 下载工作区文件               |
+| GET  | `/api/brands`                         | 品牌列表                     |
+| GET  | `/api/brands/{brand}/series`          | 车系列表                     |
+| GET  | `/api/cars`                           | 车型搜索                     |
+| GET  | `/api/cars/{model_id}`                | 车型详情                     |
+| GET  | `/api/health`                         | 健康检查                     |
 
 除注册、登录与健康检查外，其余接口均需要 `Authorization: Bearer <token>`。
 
@@ -382,37 +406,41 @@ cd ..
 
 ## 配置说明
 
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `OPENAI_API_BASE` | DashScope 兼容端点 | OpenAI 兼容服务地址 |
-| `OPENAI_MODEL` | `kimi-k3` | 模型名，按实际服务填写 |
-| `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TOP_P` | 不设置 | 留空则不传给模型，避免不支持该参数的模型报 400 |
-| `LLM_TIER_ENABLED` | `false` | 多层模型路由总开关，关闭时全部使用 `OPENAI_MODEL` |
-| `LLM_TIER_HIGH_MODEL` / `LLM_TIER_MEDIUM_MODEL` / `LLM_TIER_LOW_MODEL` | `qwen3.8-max-0902` / `qwen-plus` / `qwen-turbo` | 复杂 / 中等 / 简单问题使用的模型 |
-| `LLM_CLASSIFIER_MODEL` | `qwen-turbo` | 复杂度分类模型 |
-| `LLM_CLASSIFIER_MAX_TOKENS` | `200` | 分类输出 token 上限 |
-| `FILESYSTEM_BACKEND` | `local` | `local` 或 `memory` |
-| `WORKSPACE_DIR` | `./workspace` | Agent 工作区，相对路径解析到 `backend/app/workspace` |
-| `CHECKPOINTER_TYPE` | `redis` | `redis` 或 `memory`（仅测试） |
-| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` | `127.0.0.1` / `6379` / 空 / `0` | Redis 连接信息 |
-| `REDIS_CHECKPOINT_TTL_MINUTES` | `4320` | 检查点保留时长，默认 3 天，读取自动续期 |
-| `REDIS_MAINTENANCE_INTERVAL_SECONDS` | `3600` | 检查点维护任务扫描间隔 |
-| `LLM_MAX_RETRIES` | `3` | 临时错误自动重试次数 |
-| `MAX_RECOVERABLE_RETRIES` | `2` | 工具可恢复错误回到 Agent 的上限 |
-| `OPENAI_TIMEOUT_SECONDS` | `120` | 单次模型请求超时 |
-| `ENABLED_SUBAGENTS` | 空 | 逗号分隔，留空表示启用全部子 Agent |
-| `RAG_*` | 见模板 | 知识库目录、embedding、rerank、检索与分块参数 |
-| `AMAP_WEBSERVICE_KEY` | 空 | 高德 Web 服务 Key |
-| `ACP_*` | 关闭 | ACP 文件生成开关、命令、参数与超时 |
-| `FEISHU_*` | 关闭 | 飞书渠道凭据 |
+| 配置项                                                                       | 默认值                                                | 说明                                                   |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------ |
+| `OPENAI_API_BASE`                                                          | DashScope 兼容端点                                    | OpenAI 兼容服务地址                                    |
+| `OPENAI_MODEL`                                                             | `kimi-k3`                                           | 模型名，按实际服务填写                                 |
+| `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TOP_P`                     | 不设置                                                | 留空则不传给模型，避免不支持该参数的模型报 400         |
+| `LLM_TIER_ENABLED`                                                         | `false`                                             | 多层模型路由总开关，关闭时全部使用 `OPENAI_MODEL`    |
+| `LLM_TIER_HIGH_MODEL` / `LLM_TIER_MEDIUM_MODEL` / `LLM_TIER_LOW_MODEL` | `qwen3.8-max-0902` / `qwen-plus` / `qwen-turbo` | 复杂 / 中等 / 简单问题使用的模型                       |
+| `LLM_CLASSIFIER_MODEL`                                                     | `qwen-turbo`                                        | 复杂度分类模型                                         |
+| `LLM_CLASSIFIER_MAX_TOKENS`                                                | `200`                                               | 分类输出 token 上限                                    |
+| `FILESYSTEM_BACKEND`                                                       | `local`                                             | `local` 或 `memory`                                |
+| `WORKSPACE_DIR`                                                            | `./workspace`                                       | Agent 工作区，相对路径解析到 `backend/app/workspace` |
+| `CHECKPOINTER_TYPE`                                                        | `redis`                                             | `redis` 或 `memory`（仅测试）                      |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB`          | `127.0.0.1` / `6379` / 空 / `0`                 | Redis 连接信息                                         |
+| `REDIS_CHECKPOINT_TTL_MINUTES`                                             | `4320`                                              | 检查点保留时长，默认 3 天，读取自动续期                |
+| `REDIS_MAINTENANCE_INTERVAL_SECONDS`                                       | `3600`                                              | 检查点维护任务扫描间隔                                 |
+| `LLM_MAX_RETRIES`                                                          | `3`                                                 | 临时错误自动重试次数                                   |
+| `MAX_RECOVERABLE_RETRIES`                                                  | `2`                                                 | 工具可恢复错误回到 Agent 的上限                        |
+| `OPENAI_TIMEOUT_SECONDS`                                                   | `120`                                               | 单次模型请求超时                                       |
+| `DEGRADE_ENABLED`                                                          | `true`                                              | 依赖降级总开关，关闭后依赖异常按原策略报错             |
+| `DEGRADE_FORCE`                                                            | `false`                                             | 强制降级，四项全部生效，用于演练与应急                 |
+| `RAG_DEGRADE_COOLDOWN_SECONDS`                                             | `60`                                                | RAG 故障后的冷却窗口，窗口内检索直接返回空结果         |
+| `ENABLED_SUBAGENTS`                                                        | 空                                                    | 逗号分隔，留空表示启用全部子 Agent                     |
+| `RAG_*`                                                                    | 见模板                                                | 知识库目录、embedding、rerank、检索与分块参数          |
+| `AMAP_WEBSERVICE_KEY`                                                      | 空                                                    | 高德 Web 服务 Key                                      |
+| `ACP_*`                                                                    | 关闭                                                  | ACP 文件生成开关、命令、参数与超时                     |
+| `FEISHU_*`                                                                 | 关闭                                                  | 飞书渠道凭据                                           |
 
 ## 已知限制
 
 - ACP 依赖本地已安装并已登录的 ACP 服务端；TRAE CLI 2.0 仅企业版旗舰版套餐可用，个人版需改用其他 ACP 智能体（如 Qwen Code）。
 - ACP 链路只支持文本文件写入（Markdown、TXT、CSV 等），不支持二进制文档。
-- 检查点依赖 Redis 8.0（内置 RedisJSON/RediSearch）或已安装这两个模块；缺少 `JSON.SET`/`FT.CREATE` 时启动失败并给出提示。
+- 检查点依赖 Redis 8.0（内置 RedisJSON/RediSearch）或已安装这两个模块；缺少 `JSON.SET`/`FT.CREATE` 时按降级策略改用内存检查点，`DEGRADE_ENABLED=false` 时启动失败并给出提示。
 - 同一线程的并发请求不做串行化，可能产生检查点写入冲突，前端需避免对同一会话同时发起多个请求。
 - RAG 索引在首次检索时构建，文档较多时首次请求耗时较长，之后复用 Chroma 集合。
 - 车型数据为静态 CSV，更新数据需替换 `data/cars.csv` 并重启后端。
 - 多层模型路由开启后每次请求增加一次小模型分类调用（约数百毫秒到 1 秒）；分档准确性依赖分类提示词，短问题可能因缺少上下文被误判，已通过附带上一轮助手回复缓解。
-- 三档模型名配置错误会直接调用失败，按现有错误策略返回可重试错误，不做自动降级。
+- 三档模型名配置错误时按降级策略逐级降档；全部档位都失败才返回可重试错误。
+- 降级模式与跨重启持久化不可兼得：Redis 不可用时内存检查点重启即丢失，中断恢复与断点续跑随之失效。
